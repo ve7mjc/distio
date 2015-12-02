@@ -16,9 +16,18 @@ import time
 import os, urlparse
 import paho.mqtt.client as paho
 
+import json
+from pprint import pprint
+
 logging.basicConfig(level = logging.DEBUG,
 	format = '(%(threadName)-15s) %(message)s',
 		)
+
+with open('config.json') as data_file:    
+    config = json.load(data_file)
+
+services = config["services"]
+print ("Loaded " + str(len(services)) + " services from config")
 
 # class ServiceProcess(threading.Thread):
 
@@ -42,10 +51,17 @@ class Service(threading.Thread):
 		self.processRunning = False
 		self.processStarted = False
 		threading.Thread.__init__(self)
+		self.process = None # keep the noise down
 
 	def startProcess(self):
+
+		# log the start time of the process
+		# Time.time() returns elapsed time in seconds as a float
 		self.lastStartTime = time.time()
+
+		# launch process and pass handle
 		self.process = subprocess.Popen(self.config["cmd"], shell=True)
+		
 		self.processRunning = True
 		self.processStarted = True
 		self.msgQ.put("running " + self.config["name"])
@@ -66,7 +82,8 @@ class Service(threading.Thread):
 
 	def run(self):
 
-		self.startProcess()
+		# calling this seperately now
+		#self.startProcess()
 
 		# detect that we have began execution of the process
 		# but differentiate that it has not yet started
@@ -79,7 +96,7 @@ class Service(threading.Thread):
 			# returns error code elsewise
 			# since scripts ofter return (int)0, we must be specific
 			# to look for anything BUT (NoneType)None
-			if not self.process.poll() == None:
+			if self.process and not self.process.poll() == None:
 				# we have an exit
 				self.processRunning = False
 				#elf.msgQ.put(self.config["name"] + " exited unexpectedly")
@@ -87,18 +104,18 @@ class Service(threading.Thread):
 			# waste cycles until the next loop
 			time.sleep(0.05)
 
-		print("exiting thread run()")
-
 		return
 
+	# stop thread, not process directly
 	def stop(self):
 		self.stopProcess()
 		self._stop.set()
 
+	# is the thread intended to be stopped?
 	def stopped(self):
 		return self._stop.isSet()
 
-	def restart(self):
+	def restartProcess(self):
 		self.msgQ.put("restarting " + self.config["name"])
 		self.stopProcess()
 		self.startProcess()
@@ -136,47 +153,48 @@ def on_log(mosq, obj, level, string):
     print(string)
 
 def mqttcLog(message, level = "debug"):
-	mqttc.publish("logs/" + clientName + "/" + level.lower(), message)
+	mqttc.publish("logs/" + config["mqttClientName"] + "/" + level.lower(), message)
 
-clientName = "overwatch"
-mqttc = paho.Client(clientName)
+mqttc = paho.Client(config["mqttClientName"])
 mqttc.on_message = on_message
 mqttc.on_connect = on_connect
 mqttc.on_publish = on_publish
 mqttc.on_subscribe = on_subscribe
 
 # Parse CLOUDMQTT_URL (or fallback to localhost)
-url_str = os.environ.get('CLOUDMQTT_URL', 'mqtt://172.23.2.5:1883')
+url_str = os.environ.get('CLOUDMQTT_URL', 'mqtt://' + config["mqttRemoteHost"] + ":" + str(config["mqttRemotePort"]))
 url = urlparse.urlparse(url_str)
-
-serviceThreads = [] # for tracking
-
-serviceList = [] # tracking collection of services/modules
-serviceList.append({"name" : "Security Agent", "cmd" : "python security.py"})
-serviceList.append({"name" : "MQTT Dummy", "cmd" : "python dummy.py"})
-serviceList.append({"name" : "MQTT Dummy", "cmd" : "python dummy.py"})
-serviceList.append({"name" : "MQTT Dummy", "cmd" : "python dummy.py"})
 
 # Initialize and begin MQTT
 #mqttc.username_pw_set(url.username, url.password)
-mqttc.will_set('clients/' + clientName, 'offline', 0, False)
+mqttc.will_set('clients/' + config["mqttClientName"], 'offline', 0, False)
 mqttc.connect(url.hostname, url.port)
 
 # Start up modules
-for service in serviceList:
+serviceThreads = [] # for tracking
+for service in services:
 	t = Service(service)
 	serviceThreads.append(t)
 	t.start()
 
-# we are now healthy
-mqttc.publish("clients/" + clientName, 'healthy')
+	# start associated process if service is enabled
+	# per config file
+	if service["enabled"].lower() == "true":
+		t.startProcess()
 
+# we are now healthy
+mqttc.publish("clients/" + config["mqttClientName"], 'healthy')
+
+# start loop asynchronously so we do not
+# have to enter the paho blocking network loop
 mqttc.loop_start()
 
 # blocking loop with a KeyboardInterrupt exit
 try:
 	while True:
 
+		# remember, some services may be disabled and not
+		# intended to be running
 		for service in serviceThreads:
 		
 			# process thread born messages to 
@@ -190,7 +208,7 @@ try:
 			# lets restart it while being careful not to flap
 			if service.processStarted and not service.processRunning:
 				if ((time.time() - service.lastStartTime) > 1):
-					service.restart()
+					service.restartProcess()
 
 		# sleep for 50ms
 		time.sleep(0.05)
