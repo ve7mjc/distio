@@ -51,13 +51,19 @@ class Service(threading.Thread):
 		self.processRunning = False
 		self.processStarted = False
 		threading.Thread.__init__(self)
-		self.process = None # keep the noise down
+		# keep the noise down
+		self.process = None 
+		self.watchmtime = None
 
 	def startProcess(self):
 
 		# log the start time of the process
 		# Time.time() returns elapsed time in seconds as a float
 		self.lastStartTime = time.time()
+
+		# manage auto reload on file change
+		if "reload_watch" in self.config:
+			self.watchmtime = os.stat(self.config["reload_watch"]).st_mtime
 
 		# launch process and pass handle
 		self.process = subprocess.Popen(self.config["cmd"], shell=True)
@@ -210,8 +216,16 @@ try:
 				if ((time.time() - service.lastStartTime) > 1):
 					service.restartProcess()
 
+			# manage auto reload on file change
+			# we need to watch this rather infrequently
+			if not service.watchmtime == None:
+				if os.stat(service.config["reload_watch"]).st_mtime > service.watchmtime:
+					mqttcLog("Detected modification in watched file " + service.config["reload_watch"] + ".  Restarting " + service.config["name"], "notice")
+					service.restartProcess()
+
 		# sleep for 50ms
-		time.sleep(0.05)
+		# sleeping for 200ms until we can come up with dividers
+		time.sleep(0.2)
 
 except KeyboardInterrupt:
 
