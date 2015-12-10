@@ -19,24 +19,20 @@ import paho.mqtt.client as paho
 import json
 from pprint import pprint
 
+import re
+from fnmatch import fnmatch, fnmatchcase
+
 logging.basicConfig(level = logging.DEBUG,
 	format = '(%(threadName)-15s) %(message)s',
 		)
 
-with open('config.json') as data_file:    
+# Load JSON configuration from disk
+with open('config.json') as data_file:
     config = json.load(data_file)
 
 services = config["services"]
 print ("Loaded " + str(len(services)) + " services from config")
 
-# class ServiceProcess(threading.Thread):
-
-# 	def __init__(self, config):
-# 		threading.Thread.__init__(self)
-# 		pass
-
-# 	def run(self):
-# 		pass
 
 # Service Handler
 # Thread with associated process
@@ -133,19 +129,18 @@ def on_connect(mosq, obj, rc):
 	#mqttc.publish("logs/" + clientName + "/notice", "started overwatch")
 	pass
 
-def on_it100_message(mosq, obj, msg):
-    if (fnmatch(msg.topic, 'alarm/it100/event') == True):
-        print("IT100 Event Message")
-        if (msg.payload == "alarm"):
-            print("We have ourselves an alarm!")
-            mqttc.publish("mqttwarn/alarm", "house alarm")
-        if (msg.payload == "alarm_restoral"):
-            print("We are all clear now!")
-    elif (fnmatch(msg.topic, 'alarm/it100/partition/[0-9]*/event') == True):
-        print("IT100 Partition Event Message")
-
 def on_message(mosq, obj, msg):
-    print(msg.topic + " " + str(msg.qos) + " " + str(msg.payload))
+
+	if (fnmatch(msg.topic, 'clients/+/status') == True):
+		print("brief status")
+		# client status received
+		pass
+
+	if (fnmatch(msg.topic, 'clients/+/fullstatus') == True):
+		print("full status")
+		pass
+
+	print(msg.topic + " " + str(msg.qos) + " " + str(msg.payload))
 
 def on_publish(mosq, obj, mid):
     pass
@@ -189,50 +184,64 @@ for service in services:
 		t.startProcess()
 
 # we are now healthy
-mqttc.publish("clients/" + config["mqttClientName"], 'healthy')
+mqttc.publish("clients/" + config["mqttClientName"] + "/status", 'healthy')
 
-# start loop asynchronously so we do not
-# have to enter the paho blocking network loop
-mqttc.loop_start()
+mqttc.subscribe("clients/#") # what qos do we want?
+
+# Update retained status json topic in MQTT
+#
+status = {}
+status["services"] = {}
+def updateStatus():
+	for service in serviceThreads:
+		pass
+
+def checkServices():
+	# remember, some services may be disabled and not
+	# intended to be running
+	for service in serviceThreads:
+	
+		# process thread born messages to 
+		# pass to logging facility
+		if not service.msgQ.empty():
+			msg = service.msgQ.get(False)
+			service.msgQ.task_done()
+			mqttcLog(msg)
+
+		# if process should be running but is not
+		# lets restart it while being careful not to flap
+		if service.processStarted and not service.processRunning:
+			if ((time.time() - service.lastStartTime) > 2):
+				service.restartProcess()
+
+		# manage auto reload on file change
+		# we need to watch this rather infrequently
+		if not service.watchmtime == None:
+			if os.stat(service.config["reload_watch"]).st_mtime > service.watchmtime:
+				#mqttcLog("Detected modification in watched file " + service.config["reload_watch"] + ".  Restarting " + service.config["name"], "notice")
+				service.restartProcess()
+
 
 # blocking loop with a KeyboardInterrupt exit
+# not sure why we need to maintain a variable to kill the while loop
+exiting = False
 try:
-	while True:
+	while not exiting:
 
-		# remember, some services may be disabled and not
-		# intended to be running
-		for service in serviceThreads:
-		
-			# process thread born messages to 
-			# pass to logging facility
-			if not service.msgQ.empty():
-				msg = service.msgQ.get(False)
-				service.msgQ.task_done()
-				mqttcLog(msg)
+		checkServices()
 
-			# if process should be running but is not
-			# lets restart it while being careful not to flap
-			if service.processStarted and not service.processRunning:
-				if ((time.time() - service.lastStartTime) > 1):
-					service.restartProcess()
-
-			# manage auto reload on file change
-			# we need to watch this rather infrequently
-			if not service.watchmtime == None:
-				if os.stat(service.config["reload_watch"]).st_mtime > service.watchmtime:
-					mqttcLog("Detected modification in watched file " + service.config["reload_watch"] + ".  Restarting " + service.config["name"], "notice")
-					service.restartProcess()
+		# run mqttc loop
+		mqttc.loop()
 
 		# sleep for 50ms
 		# sleeping for 200ms until we can come up with dividers
-		time.sleep(0.2)
+		time.sleep(0.1)
 
-except KeyboardInterrupt:
+except (KeyboardInterrupt, SystemExit):
 
+	exiting = True
 	print("Received keyboard interrupt.  Shutting down..")
 
 	for thread in serviceThreads:
 		thread.stop()
 
-	# exit non-forcefully
-	mqttc.loop_stop(False)

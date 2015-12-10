@@ -1,7 +1,15 @@
 #!/usr/bin/python
 
-# Dummy MQTT Agent
-# For testing process control and failover
+# Simulator MQTT Agent
+# For testing process control and failover of the overwatch core
+#
+# Generates a random 
+# Joins MQTT bus
+# Maintains LWT and client status
+#
+# Simulation Modes:
+# - Exit after a random length of time
+#
 
 import os, urlparse
 from fnmatch import fnmatch, fnmatchcase
@@ -36,7 +44,7 @@ def on_subscribe(mosq, obj, mid, granted_qos):
 def on_log(mosq, obj, level, string):
     print(string)
 
-clientName = "dummy" + str(random.randrange(1000, 9999, 2))
+clientName = "SimNode" + str(random.randrange(1000, 9999, 2))
 
 mqttc = paho.Client(clientName, True)
 # Assign event callbacks
@@ -51,7 +59,7 @@ mqttc.will_set('clients/' + clientName, 'offline', 0, False)
 mqttc.connect("172.23.2.5", 1883)
 
 # Start subscribe, with QoS level 0
-mqttc.subscribe("dummy/#", 0)
+mqttc.subscribe(clientName + "/#", 0)
 # mqttc.message_callback_add("alarm/it100/#", on_it100_message)
 
 # Continue the network loop, exit when an error occurs
@@ -62,7 +70,7 @@ mqttc.publish("clients/" + clientName, "healthy")
 
 mqttc.loop_start()
 
-randomExitTime = random.randrange(3,8,1)
+randomExitTime = random.randrange(5*60,1*60*60,1)
 #print("faking an exit in " + str(randomExitTime) + " seconds")
 
 while randomExitTime:

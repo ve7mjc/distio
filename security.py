@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-# Building Security Agent
+# Physical Security Agent
 # Provides logic to building security
 # Monitors alarm systems and sensors
 # Creates alerts and acts on alarms
@@ -11,29 +11,42 @@
 # IT100 DSC Security System
 # Alternative GPIO
 
+# Generic Abstract Alarm System
+# Alarms have zones and partitions
+# Zones have various states and events
+# Partitions have states and events
+# Partitions can be armed/etc
+
 # Outputs:
 # Alerts --> MQTTWARN
 
 import os, urlparse
 from fnmatch import fnmatch, fnmatchcase
+import time
 
 import paho.mqtt.client as paho
 
 # Define event callbacks
 def on_connect(mosq, obj, rc):
-    pass
     #print("rc: " + str(rc))
+    pass
 
 def on_it100_message(mosq, obj, msg):
-    if (fnmatch(msg.topic, 'alarm/it100/event') == True):
+    if (fnmatch(msg.topic, 'alarm/event') == True):
         print("IT100 Event Message")
         if (msg.payload == "alarm"):
             print("We have ourselves an alarm!")
+            #mqttc.publish("comms/sms/2507556998", "HOUSE ALARM!!")
             mqttc.publish("mqttwarn/alarm", "house alarm")
         if (msg.payload == "alarm_restoral"):
+            mqttc.publish("comms/alert", "House Alarm Activated")
+            #mqttc.publish("comms/sms/2507556998", "ALL CLEAR! House alarm restored.")
             print("We are all clear now!")
     elif (fnmatch(msg.topic, 'alarm/it100/partition/[0-9]*/event') == True):
-        print("IT100 Partition Event Message")
+        print("IT100 Partition Event Message: " + msg.payload)
+
+def zoneStatusChange():
+    pass
 
 def on_message(mosq, obj, msg):
     print(msg.topic + " " + str(msg.qos) + " " + str(msg.payload))
@@ -49,7 +62,8 @@ def on_subscribe(mosq, obj, mid, granted_qos):
 def on_log(mosq, obj, level, string):
     print(string)
 
-mqttc = paho.Client()
+clientName = "SecurityAgent"
+mqttc = paho.Client(clientName)
 # Assign event callbacks
 mqttc.on_message = on_message
 mqttc.on_connect = on_connect
@@ -65,17 +79,31 @@ url = urlparse.urlparse(url_str)
 
 # Connect
 #mqttc.username_pw_set(url.username, url.password)
+mqttc.will_set('clients/' + clientName, 'offline', 0, False)
 mqttc.connect(url.hostname, url.port)
 
 # Start subscribe, with QoS level 0
 mqttc.subscribe("alarm/#", 0)
 mqttc.message_callback_add("alarm/it100/#", on_it100_message)
 
-# Publish a message
-# mqttc.publish("hello/world", "my message")
+# Functioning per orders
+mqttc.publish("clients/" + clientName, "healthy")
 
-# Continue the network loop, exit when an error occurs
-rc = 0
-while rc == 0:
-    rc = mqttc.loop()
-#print("rc: " + str(rc))
+systems = []
+dsc = '{"name":"DSC Power632","module":"it100"}'
+systems.append(dsc)
+
+partitions = []
+office = '{"type":"virtual",name":"Office","zones":[{"source" : "it100", "zone" : 1}, {"source":"it100","zone":2}]}'
+partitions.append(office)
+
+# blocking loop with a KeyboardInterrupt exit
+try:
+    while True:
+        mqttc.loop()
+        time.sleep(0.1)
+        pass
+
+except KeyboardInterrupt:
+
+    print("Received keyboard interrupt.  Shutting down..")

@@ -17,8 +17,11 @@ import json, pprint
 
 import re
 
-BUFFER_SIZE = 1024
 TARGET_TOPIC = "environment/winchelsea/wind"
+REMOTE_TCP_HOST = "powderpoint.dyndns.org"
+REMOTE_TCP_PORT = 5501
+
+BUFFER_SIZE = 1024
 
 # Define event callbacks
 def on_connect(mosq, obj, rc):
@@ -67,6 +70,9 @@ serviceStatus["sub"]["anemometer"] = {}
 serviceStatus["sub"]["anemometer"]["description"] = "Ultrasonic Anemomometer"
 serviceStatus["sub"]["anemometer"]["depends"] = "serialip"
 
+def writeLog(message, level = "debug"):
+    mqttc.publish("log/" + clientName + "/" + level)
+
 # should be able to get overall status easily
 # clients/anemometer/status ["health"] = healthy
 def sitRep():
@@ -76,7 +82,12 @@ def sitRep():
 sitRep()
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect(("powderpoint.dyndns.org", 5501))
+try:
+    s.connect((REMOTE_TCP_HOST, REMOTE_TCP_PORT))
+    writeLog("Connected to " + REMOTE_TCP_HOST + ":" + str(REMOTE_TCP_PORT))
+except:
+    writeLog("Failed connecting to " + REMOTE_TCP_HOST + ":" + str(REMOTE_TCP_PORT))
+
 
 # blocking loop with a KeyboardInterrupt exit
 try:
