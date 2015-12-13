@@ -88,9 +88,9 @@ def setDigitalOutput(channel, value):
 
 	# check that requested channel exists
 	channel = int(channel)
-	if (channel < 0) or (channel > NUM_DIO_OUTPUTS):
+	if (channel < 0) or (channel >= NUM_DIO_OUTPUTS):
 		# todo throw exception
-		writeLog("channel of {0} does not match 0-{1}".format(channel,NUM_DIO_OUTPUTS), "error")
+		writeLog("channel of {0} does not match 0-{1}".format(channel,NUM_DIO_OUTPUTS-1), "error")
 		return True
 	
 	# substitute supplied value
@@ -108,7 +108,7 @@ def setDigitalOutput(channel, value):
 
 	# track, publish, and set state
 	# cache state to disk
-	state["outputs"][channel-1]["state"] = value
+	state["outputs"][channel]["state"] = value
 	mqttc.publish("io/{0}/dio/output/{1}/state".format(clientName, channel), value, 1, True)
 	pfio.digital_write(channel, value)
 	writeState()
@@ -117,7 +117,7 @@ def setDigitalInputPullup(channel, value):
 
 	# check that requested channel exists
 	channel = int(channel)
-	if (channel < 0) or (channel > NUM_DIO_INPUTS):
+	if (channel < 0) or (channel >= NUM_DIO_INPUTS):
 		# todo throw exception
 		return True
 	
@@ -135,7 +135,7 @@ def setDigitalInputPullup(channel, value):
 
 	# track, publish, and set state
 	# cache state to disk
-	state["inputs"][channel-1]["pullup"] = value
+	state["inputs"][channel]["pullup"] = value
 	mqttc.publish("io/{0}/dio/in/{1}/pullup".format(clientName, channel), value, 1, True)
 	pfio.digital_write_pullup(channel, value)
 	writeState()
@@ -156,11 +156,11 @@ def loadState():
 		return True
 
 	# resume IO state and settinsg
-	for i in range(1,len(state["outputs"])):
-		pfio.digital_write(i, state["outputs"][i-1]["state"])
-	for i in range(1,len(state["inputs"])):
-		pfio.digital_write_pullup(i, state["inputs"][i-1]["pullup"])
-		state["inputs"][i-1]["state"] = pfio.digital_read(i)
+	for i in range(len(state["outputs"])):
+		pfio.digital_write(i, state["outputs"][i]["state"])
+	for i in range(len(state["inputs"])):
+		pfio.digital_write_pullup(i, state["inputs"][i]["pullup"])
+		state["inputs"][i]["state"] = pfio.digital_read(i)
 
 	return False
 
@@ -177,17 +177,17 @@ def initState():
 	state  = {}
 	
 	state["inputs"] = []
-	for i in range(1, NUM_DIO_INPUTS):
+	for i in range(NUM_DIO_INPUTS):
 		input = {}
 		state["inputs"].append(input)
-		state["inputs"][i-1]["state"] = 0
-		state["inputs"][i-1]["pullup"] = 0
+		state["inputs"][i]["state"] = 0
+		state["inputs"][i]["pullup"] = 0
 		
 	state["outputs"] = []
-	for i in range(1, NUM_DIO_OUTPUTS):
+	for i in range(NUM_DIO_OUTPUTS):
 		output = {}
 		state["outputs"].append(output)
-		state["outputs"][i-1]["state"] = 0
+		state["outputs"][i]["state"] = 0
 ###############################
 
 pfio.init()
@@ -213,23 +213,21 @@ mqttc.on_subscribe = on_subscribe
 mqttc.will_set('clients/' + clientName + '/status', 'offline', 1, True)
 mqttc.connect(config["mqttRemoteHost"], config["mqttRemotePort"])
 
-# blocking loop with a KeyboardInterrupt exit
+# blocking loop with a KeyboardInterrupt exit 
 running = True
 try:
     while running:
 	
-		# todo, no debouncing or anything
-		for i in range(1,NUM_DIO_INPUTS):
+		# todo, no debouncing or anything 
+		for i in range(NUM_DIO_INPUTS):
 			inputstate = pfio.digital_read(i)
 			# if change detected
-			if state["inputs"][i-1]["state"] != inputstate:
-				state["inputs"][i-1]["state"] = inputstate
-				mqttc.publish("io/{0}/dio/input/{1}/state".format(clientName, i), inputstate)
+			if state["inputs"][i]["state"] != inputstate:
+				state["inputs"][i]["state"] = inputstate
+				mqttc.publish("io/{0}/dio/input/{1}/state".format(clientName, i), inputstate, 2, True)
 				writeState()
 		
-		mqttc.loop()
-		
-		time.sleep(0.1)
+		mqttc.loop(timeout=0.01)
 
 # Keyboard interrupt has been received,
 # attempt to cease the mainloop gracefully
