@@ -1,0 +1,5 @@
+{
+	"mqttClientName" : "piface",
+	"mqttRemoteHost" : "127.0.0.1",
+	"mqttRemotePort" : 1883
+}
