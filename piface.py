@@ -16,11 +16,13 @@ class PiFaceAdapter(distioclient.DistIoClient):
 		self.num_dio_outputs = 8
 		pfio.init()
 
-	def setDigitalOutput(channel, value):
+	def setDigitalOutput(self, channel, value):
 		pfio.digital_write(channel, value)
+		return False
 		
-	def setDigitalInputPullup(channel, value):
+	def setDigitalInputPullup(self, channel, value):
 		pfio.digital_write_pullup(channel, value)
+		return False
 
 	def pollInputs(self):
 		for i in range(self.num_dio_inputs):
