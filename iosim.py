@@ -22,7 +22,7 @@ class IoSim(distioclient.DistIoClient):
 	
 	def setDigitalOutput(self, channel, value, quiet = False):
 		print("set_dio_output({0},{1})".format(channel, value))
-		return false
+		return False
 	
 	def pollInputs(self):
 		# return nothing, which is fine
