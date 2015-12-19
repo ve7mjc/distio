@@ -10,6 +10,7 @@ import re
 import paho.mqtt.client as paho
 import json, pprint
 
+
 class DistIoClient():
 
 	def __init__(self, config=None):
@@ -19,7 +20,8 @@ class DistIoClient():
 		self.num_dio_outputs = 0
 		self.num_adc_inputs = 0
 		self.num_dac_outputs = 0
-		
+		self.debug_enabled = False
+
 		self.auto_run = True
 
 		# calculate application base name and real application path
@@ -63,16 +65,16 @@ class DistIoClient():
 		self.mqttc = paho.Client(self.clientName)
 
 		# Assign event callbacks for MQTT client
-		receiver = MqttReceiver(self)
-		self.mqttc.on_message = receiver.onMqttMessage
-		self.mqttc.on_connect = receiver.onMqttConnect
-		self.mqttc.on_publish = receiver.onMqttPublish
-		self.mqttc.on_subscribe = receiver.onMqttSubscribe
+		self.mqttc.on_message = self._onMqttMessage
+		self.mqttc.on_connect = self._onMqttConnect
+		self.mqttc.on_publish = self._onMqttPublish
+		self.mqttc.on_subscribe = self._onMqttSubscribe
 
 		# Set MQTT Last Will and Testament to maintain
 		# client status tracking
 		# maintaind during on_connect callback also
-		print("Connecting to MQTT Broker at {0}:{1}".format(self.config["mqttRemoteHost"], self.config["mqttRemotePort"]))
+		if self.debug_enabled:
+			print("Connecting to MQTT Broker at {0}:{1}".format(self.config["mqttRemoteHost"], self.config["mqttRemotePort"]))
 		self.mqttc.will_set("clients/{0}/status".format(self.clientName), 'offline', 1, True)
 		self.mqttc.connect(self.config["mqttRemoteHost"], self.config["mqttRemotePort"])
 		self.mqttc.loop_start()
@@ -80,52 +82,92 @@ class DistIoClient():
 		# what about the persistence cache?
 		self.initState()
 		self.inputStateCheck = []
-		
+		self.dioOutputPulse = []
+		for i in range(self.num_dio_outputs):
+			self.dioOutputPulse.append(Pulse())
+
 		# automatically begin mainloop unless
 		# directed otherwise in reimplemented init() method
 		if self.auto_run: self.run()
-		
+
 	def init():
 		pass
 
-	# Define event callbacks
-	# <__main__.PiFaceAdapter object at 0xca2a90>
-	# <paho.mqtt.client.Client object at 0xca2b50>
-	# None, 
-	# {'session present': 0}, 
-	# 0)
- 	# self.on_connect(self, self._userdata, flags_dict, result
-	def onMqttConnect(self):
-
-		print("Connected to MQTT")
+	def _onMqttConnect(self, *args, **kwargs):
 		self.mqttc.subscribe("io/{0}/#".format(self.clientName), 1)
 		self.mqttc.publish("clients/{0}/status".format(self.clientName), 'online', 1, True)
 
-	def onMqttMessage(self, client, mosq, obj, msg):
+	def _onMqttMessage(self, *args, **kwargs):
 
-		# dio-output set value
-		match = re.search("io/{0}/dio-output/([0-9A-Za-z]*)/set".format(self.clientName), msg.topic)
+		# will it always be 2?
+		msg = args[2]
+
+		# dio-output set parameter
+		# Valid Parameters:
+		# state - set output state (on/off, etc)
+		# mode - Set output mode, (open_collector, logic, etc)
+		# pulse - Start pulse patten
+		match = re.search("io/{0}/dio-output/([0-9]*)/set/([0-9A-Za-z]*)".format(self.clientName), msg.topic)
 		if match:
-			self._setDigitalOutput(match.group(1), msg.payload)
+		
+			channel = int(match.group(1))
+			message = msg.payload.decode("utf-8")
+			
+			if (channel < 0) or (channel >= self.num_dio_outputs):
+				self.writeLog("specified channel ({0}) is not within range of 0-{1}".format(channel, (self.num_dio_outputs-1)), "error")
+
+			if match.group(2).lower() == "state":
+				self._setDigitalOutput(channel, message)
+				if self.debug_enabled:
+					print("set state ch {0} to {1}".format(channel, message))
+
+			# Pulse output
+			# Length of ON
+			# Length of OFF
+			# Repetitions
+			# Time Off Between = 0
+			elif match.group(2).lower() == "pulse":
+				
+				# Return if we do not have arguments
+				if not len(message):
+					self.writeLog("pulse command requires arguments \"{0}\"".format(msg.topic), "error")
+					return True
+				
+				arguments = []
+				if ',' in message: arguments = str(message).split(",")
+				else: arguments.append(message)
+
+				# Proceed with Pulse Call
+				if not self.dioOutputPulse[channel].pulse(arguments):
+					# Turn DIO Channel ON quietly
+					self._setDigitalOutput(channel, 1, True)
+				else:
+					self.writeLog("failed to pulse output channel \"{0}\"; bad arguments".format(channel), "error")
+			
+			else:
+				# error, unrecognized command
+				self.writeLog("unrecognized command \"{0}\" -> \"{1}\" received; ignoring".format(msg.topic, message), "error")
 
 		# dio-output pullup set
-		match = re.search("io/{0}/dio-input/([0-9A-Za-z]*)/pullup/set".format(self.clientName), msg.topic)
+		match = re.search("io/{0}/dio-input/([0-9]*)/pullup/set/([0-9A-Za-z]*)".format(self.clientName), msg.topic)
 		if match:
-			self._setDigitalInputPullup(match.group(1), msg.payload)
-			
+
+			if match.group(2).lower() == "pullup":
+				self._setDigitalInputPullup(match.group(1), message)
+
 		# dio-output set mode
 		# gpio
 		# open collector
 		# tri-state
 
 		# dio-output pulse
-		
-		
 
-	def onMqttPublish(self, mosq, obj, mid):
+	# formerly _onMqttPublish(self, mosq, obj, mid):
+	def _onMqttPublish(self, *args, **kwargs):
 	    pass
 
-	def onMqttSubscribe(self, mosq, obj, mid, granted_qos):
+	# formerly _onMqttSubscribe(self, mosq, obj, mid, granted_qos):
+	def _onMqttSubscribe(self, *args, **kwargs):
 	    pass
 
 	def writeLog(self, message, level="debug"):
@@ -176,7 +218,7 @@ class DistIoClient():
 			self.state["outputs"].append(output)
 			self.state["outputs"][i]["state"] = 0
 
-	def _setDigitalOutput(self, channel, value):
+	def _setDigitalOutput(self, channel, value, quiet = False):
 
 		# check that requested channel exists
 		channel = int(channel)
@@ -192,7 +234,6 @@ class DistIoClient():
 		if (value == "low"): value = 0
 
 		value = int(value)
-
 		if not ((value == 1) or (value == 0)):
 			# todo throw exception
 			self.writeLog("value of {0} does not match 0 or 1".format(value), "error")
@@ -204,13 +245,13 @@ class DistIoClient():
 
 			# track, publish, and set state
 			# cache state to disk
-			self.state["outputs"][channel]["state"] = value
-			self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.clientName, channel), value, 1, True)
-	
-			self.writeStateCache()
+			if not quiet:
+				self.state["outputs"][channel]["state"] = value
+				self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.clientName, channel), value, 1, True)
+				self.writeStateCache()
 
-	# return False on Success, True on Error		
-	def setDigitalOutput(self, channel, value):
+	# return False on Success, True on Error
+	def setDigitalOutput(self, channel, value, quiet = False):
 		return True
 
 	def _setDigitalInputPullup(self, channel, value):
@@ -232,7 +273,7 @@ class DistIoClient():
 		if not (value == 1) or (value == 0):
 			self.writeLog("value of {0} does not match 0 or 1".format(value), "error")
 			return True
-			
+
 		# pass to another method which will often
 		# be re-implemented in subclass
 		if not self.setDigitalInputPullup(channel, value):
@@ -241,9 +282,9 @@ class DistIoClient():
 			# cache state to disk
 			self.state["inputs"][channel]["pullup"] = value
 			self.mqttc.publish("io/{0}/dio-input/{1}/pullup".format(self.clientName, channel), value, 1, True)
-	
+
 			self.writeStateCache()
-		
+
 	def setDigitalInputPullup(self, channel, value):
 		return True
 
@@ -255,43 +296,166 @@ class DistIoClient():
 				self.state["inputs"][i]["state"] = self.inputStateCheck[i]
 				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), inputStateCheck[i], 2, True)
 				self.writeStateCache()
-				
+
 	def pollInputs(self):
 		pass
-				
-	# should re-declare this method
+
 	def run(self):
 		running = True
 		try:
+			if self.debug_enabled:
+				print("starting ::run() mainloop")
+				
 			while running:
-				#self.mqttc.loop(timeout=0.01)
+				
 				self._pollInputs()
-				time.sleep(0.1)
+				
+				# Process Output Pulses
+				for i in range(self.num_dio_outputs):
+					if self.dioOutputPulse[i].process():
+						self._setDigitalOutput(i, self.dioOutputPulse[i].outputRequest, True)
+						self.dioOutputPulse[i].outputRequest = None
+				
+				time.sleep(0.01) # 10mS resolution
+				
 		except KeyboardInterrupt:
 			self.writeStateCache()
 			running = False
 
-# Not sure why I need to buffer these callbacks
-# with another class instance
-# Could be threading related
-# if not, python seems to flip/flop how many
-# arguments are in the callback
-class MqttReceiver:
-	def __init__(self, client):
-		self.client = client
-		pass
+
+# Pulse State Machine
+# 1 - On for xx ms, then off
+# 2 - On for xx ms, Off for xx ms, repeat xx times
+# 3 - On for xx ms, Off for xx ms, repeat xx times,
+#     off for xx ms, repeat xx times
+#     typical would be blink patterns on indicators
+# Note: values are milliseconds and loop counts
+#       a value of 0 indicates indefinite (may need to change)
+#
+class Pulse():
+
+	def __init__(self):
+		self.configured = False
+		self.running = False
+		self.outputRequest = None
 		
-	def onMqttConnect(self, mqttc, obj, flags, rc):
-		self.client.onMqttConnect()
+		# how do we track where we are?
+		# we are in a pulse, or an off pulse, or in between sets waiting
 
-	def onMqttMessage(self, mqttc, obj, msg):
-		print(msg.topic+" "+str(msg.qos)+" "+str(msg.payload))
+	def pulse(self, args):
 
-	def onMqttPublish(self, mqttc, obj, mid):
-		print("Published! "+str(mid))
+		# process supplied arguments
+		if len(args) > 0: self.on_time = int(args[0])
+		if len(args) > 1: self.off_time = int(args[1])
+		else: self.off_time = -1
+		if len(args) > 2: self.num_reps = int(args[2])
+		else: self.num_reps = -1
+		if len(args) > 3: self.time_between_sets = int(args[3])
+		else: self.time_between_sets = -1
+		if len(args) > 4: self.num_sets = int(args[4])
+		else: self.num_sets = -1
 
-	def onMqttSubscribe(self, mqttc, obj, mid, granted_qos):
-		print("Subscribed! - "+str(mid)+" "+str(granted_qos))
+		self.on = False
+		self.rep_count = 0
+		self.rep_timer = self.on_time
+		
+		self.configured = True
+		self.process()
 
-	def onMqttLog(self, mqttc, obj, level, string):
-		print(string)
+		self.startTimer()
+		
+		self.running = True
+		
+		# States
+		# 0 - in a pulse
+		# 1 - in a pulse off_time
+		# 2 - waiting in between sets
+		self.state = 0
+		self.currentRep = 1	
+		self.currentSet = 1
+		
+		return False
+		
+	def startTimer(self):
+		self.timer = time.time()
+		
+	def checkTimer(self):
+		elapsedTime = (time.time() - self.timer) * 1000;
+		return elapsedTime
+
+	# advance time, process state
+	def process(self):
+
+		# return if not set up properly
+		if not self.configured:
+			return False
+			
+		if self.running:
+			
+			# Waiting in a pulse
+			if self.state == 0:
+				if self.checkTimer() > self.on_time:
+					self.outputRequest = 0
+					
+					# if an off time has not been declared, we
+					# are done here
+					if self.off_time == -1:
+						self.running = False
+					else:
+						self.state = 1
+						self.startTimer()
+					
+			# Waiting after a pulse
+			elif self.state == 1:
+				
+				if self.checkTimer() > self.off_time:
+					
+					# number of reps not specified but off time
+					# was thus, we are looping indefinitely
+					if (self.num_reps <= 0):
+						self.startTimer()
+						self.state = 0
+						self.outputRequest = 1
+					# we are tracking number of reps
+					elif (self.num_reps > 0):
+						if self.currentRep < self.num_reps:
+							# go into another rep
+							self.startTimer()
+							self.currentRep = self.currentRep + 1
+							self.state = 0
+							self.outputRequest = 1
+						else:
+							# completed target number of reps
+							# do we need to enter inter-rep-delay
+							if self.time_between_sets >= 0:
+								# waiting between reps
+								self.state = 2
+								self.startTimer()
+							else:
+								# concluded our reps
+								self.running = False
+
+			# Waiting in between sets
+			elif self.state == 2:
+				if self.checkTimer() > self.time_between_sets:
+					
+					# have we completed our sets?
+					if (self.currentSet < self.num_sets) or (self.num_sets <= 0):
+						# start a new rep in a new set
+						self.currentRep = 1
+						self.currentSet = self.currentSet + 1
+						self.state = 0
+						self.outputRequest = 1
+						self.startTimer()
+					else:
+						# we are done
+						self.running = False
+
+		# If we require DIO maintenance,
+		# flag this in the return
+		if self.outputRequest is not None:
+			#print("requesting transition to {0}".format(self.outputRequest))
+			return True
+		
+		# work is not required
+		return False
