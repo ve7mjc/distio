@@ -10,6 +10,9 @@ import re
 import paho.mqtt.client as paho
 import json, pprint
 
+QOS_AT_MOST_ONCE = 0
+QOS_AT_LEAST_ONCE = 1
+QOS_EXACTLY_ONCE = 2
 
 class DistIoClient():
 
@@ -75,12 +78,19 @@ class DistIoClient():
 		# maintaind during on_connect callback also
 		if self.debug_enabled:
 			print("Connecting to MQTT Broker at {0}:{1}".format(self.config["mqttRemoteHost"], self.config["mqttRemotePort"]))
-		self.mqttc.will_set("clients/{0}/status".format(self.clientName), 'offline', 1, True)
+		self.mqttc.will_set("clients/{0}/status".format(self.clientName), 'offline', QOS_AT_LEAST_ONCE, True)
 		self.mqttc.connect(self.config["mqttRemoteHost"], self.config["mqttRemotePort"])
 		self.mqttc.loop_start()
 
-		# what about the persistence cache?
+		# Initialize state and then attemp to recover
+		# from a disk cache
+		# todo, consider reloading state from a retained
+		# MQTT topic message
 		self.initState()
+		self.loadState()
+
+		# we are not yet resuming continuous pulsing
+		# outputs from persistent state cache from disk
 		self.inputStateCheck = []
 		self.dioOutputPulse = []
 		for i in range(self.num_dio_outputs):
@@ -88,14 +98,16 @@ class DistIoClient():
 
 		# automatically begin mainloop unless
 		# directed otherwise in reimplemented init() method
-		if self.auto_run: self.run()
+		if self.auto_run: 
+			self.run()
 
 	def init():
+		# this is a stub for subclassing
 		pass
 
 	def _onMqttConnect(self, *args, **kwargs):
-		self.mqttc.subscribe("io/{0}/#".format(self.clientName), 1)
-		self.mqttc.publish("clients/{0}/status".format(self.clientName), 'online', 1, True)
+		self.mqttc.subscribe("io/{0}/+/+/set/#".format(self.clientName), QOS_EXACTLY_ONCE)
+		self.mqttc.publish("clients/{0}/status".format(self.clientName), 'online', QOS_AT_LEAST_ONCE, True)
 
 	def _onMqttMessage(self, *args, **kwargs):
 
@@ -171,10 +183,11 @@ class DistIoClient():
 	    pass
 
 	def writeLog(self, message, level="debug"):
-		self.mqttc.publish("log/{0}/{1}".format(self.clientName,level), message)
+		self.mqttc.publish("log/{0}/{1}".format(self.clientName,level), message, QOS_AT_MOST_ONCE)
 
 	def loadState(self):
 
+		# check if stateCacheFile can be read
 		if not os.path.isfile(self.stateCacheFile):
 			return True
 
@@ -186,7 +199,7 @@ class DistIoClient():
 			self.writeLog("unable to process piface cached state ({0}/piface.cache)".format(appPath))
 			return True
 
-		# resume IO state and settinsg
+		# resume IO state and settins
 		for i in range(len(state["outputs"])):
 			self.pfio.digital_write(i, state["outputs"][i]["state"])
 		for i in range(len(state["inputs"])):
@@ -247,7 +260,7 @@ class DistIoClient():
 			# cache state to disk
 			if not quiet:
 				self.state["outputs"][channel]["state"] = value
-				self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.clientName, channel), value, 1, True)
+				self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.clientName, channel), value, QOS_AT_LEAST_ONCE, True)
 				self.writeStateCache()
 
 	# return False on Success, True on Error
@@ -281,7 +294,7 @@ class DistIoClient():
 			# track, publish, and set state
 			# cache state to disk
 			self.state["inputs"][channel]["pullup"] = value
-			self.mqttc.publish("io/{0}/dio-input/{1}/pullup".format(self.clientName, channel), value, 1, True)
+			self.mqttc.publish("io/{0}/dio-input/{1}/pullup".format(self.clientName, channel), value, QOS_AT_LEAST_ONCE, True)
 
 			self.writeStateCache()
 
@@ -294,7 +307,7 @@ class DistIoClient():
 		for i in range(len(self.inputStateCheck)):
 			if self.state["inputs"][i]["state"] != self.inputStateCheck[i]:
 				self.state["inputs"][i]["state"] = self.inputStateCheck[i]
-				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), inputStateCheck[i], 2, True)
+				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), inputStateCheck[i], QOS_AT_LEAST_ONCE, True)
 				self.writeStateCache()
 
 	def pollInputs(self):
