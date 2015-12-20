@@ -5,27 +5,59 @@
 #
 # Matthew Currie <matthew@ve7mjc.com>
 # December 2015
+#
+# REMEMBER: Linux user permissions
+#           User executing this script must be in spi,gpio,
+#           and other groups
+#
 
 import distioclient
-import pifacedigitalio as pfio
+import pifacedigitalio
 
 class PiFaceAdapter(distioclient.DistIoClient):
 
 	def init(self):
+
 		self.num_dio_inputs = 8
 		self.num_dio_outputs = 8
-		pfio.init()
-
-	def setDigitalOutput(self, channel, value):
-		pfio.digital_write(channel, value)
-		return False
+		self.digitalInputPollingEnabled = False
 		
-	def setDigitalInputPullup(self, channel, value):
-		pfio.digital_write_pullup(channel, value)
+		# debounce
+		# could add code for debounce per input if needed
+		self.debounceTimeSecs = 0.10
+		
+		self.pfd =  pifacedigitalio.PiFaceDigital()
+
+		# Create listener and attach event for each input
+		self.listener = pifacedigitalio.InputEventListener(chip=self.pfd)
+
+		# Create interrupt callbacks for all inputs
+		# in both directions (rising and falling) with a
+		# debounce or settle timer, and active the 
+		# listerner thread
+		for i in range(self.num_dio_inputs):
+			self.listener.register(i, pifacedigitalio.IODIR_BOTH, self.digitalInputInterrupt, self.debounceTimeSecs)
+		self.listener.activate()
+
+	def setDigitalOutput(self, channel, value, quiet = False):
+		self.pfd.output_pins[channel].value = value
 		return False
 
+	def setDigitalInputPullup(self, channel, value):
+		self.pfd.gppub.bits[channel].value = value
+		return False
+
+	# Poll Digital Inputs
+	# Can be disabled by setting 
+	# self.digitalInputPollingEnabled to False
+	# Performance: determined through loop testing that 
+	# each digital_read takes 1.3 mS on average to poll
 	def pollInputs(self):
 		for i in range(self.num_dio_inputs):
-			self.inputStateCheck.append(pfio.digital_read(i))
+			self.inputStateCheck.append(self.pfd.input_pins[i].value)
+		pass
+
+	def digitalInputInterrupt(self, event):
+		self.digitalInputChanged(event.pin_num, event.direction, event.timestamp)
 
 pi = PiFaceAdapter()
