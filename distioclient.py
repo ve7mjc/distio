@@ -1,5 +1,8 @@
 # distio client class
 #
+# Superclass for creating powerful IO Adapters
+# which map directly to MQTT topics
+#
 
 import sys, os
 from fnmatch import fnmatch, fnmatchcase
@@ -23,7 +26,11 @@ class DistIoClient():
 		self.num_dio_outputs = 0
 		self.num_adc_inputs = 0
 		self.num_dac_outputs = 0
+		self.digitalInputPollingEnabled = True
+		
+		# debugging and performance
 		self.debug_enabled = False
+		self.inputPollTimeMs = 0
 
 		self.auto_run = True
 
@@ -98,12 +105,25 @@ class DistIoClient():
 
 		# automatically begin mainloop unless
 		# directed otherwise in reimplemented init() method
-		if self.auto_run: 
+		if self.auto_run:
 			self.run()
 
+	#
+	# STUB METHODS for reimplementation 
+	# in subclasses
+	#
 	def init():
-		# this is a stub for subclassing
 		pass
+		
+	def setDigitalOutput(self, channel, value, quiet = False):
+		return True
+		
+	def setDigitalInputPullup(self, channel, value):
+		return True
+		
+	def pollInputs(self):
+		pass
+	
 
 	def _onMqttConnect(self, *args, **kwargs):
 		self.mqttc.subscribe("io/{0}/+/+/set/#".format(self.clientName), QOS_EXACTLY_ONCE)
@@ -200,11 +220,17 @@ class DistIoClient():
 			return True
 
 		# resume IO state and settins
-		for i in range(len(state["outputs"])):
-			self.pfio.digital_write(i, state["outputs"][i]["state"])
-		for i in range(len(state["inputs"])):
-			self.pfio.digital_write_pullup(i, state["inputs"][i]["pullup"])
-			self.state["inputs"][i]["state"] = self.pfio.digital_read(i)
+		for i in range(len(self.state["outputs"])):
+			# Quietly set Digital Outputs
+			self.setDigitalOutput(i, self.state["outputs"][i]["state"], True)
+		for i in range(len(self.state["inputs"])):
+			self.setDigitalInputPullup(i, self.state["inputs"][i]["pullup"])
+			# load cached input state; which will be 
+			# checked immediately during the mainloop
+			# this helps by creating events only for
+			# inputs which have genuinely changed and will
+			# keep noise down between process cycles
+			self.state["inputs"][i]["state"] = self.state["inputs"][i]["state"]
 
 		return False
 
@@ -220,10 +246,16 @@ class DistIoClient():
 
 		self.state["inputs"] = []
 		for i in range(self.num_dio_inputs):
+			
 			input = {}
 			self.state["inputs"].append(input)
+			
+			# default to false input state until checked later on
 			self.state["inputs"][i]["state"] = 0
-			self.state["inputs"][i]["pullup"] = 0
+			
+			# default to internal pullups enabled for all inputs
+			# otherwise, unknowing users will be surprised with noise
+			self.state["inputs"][i]["pullup"] = 1
 
 		self.state["outputs"] = []
 		for i in range(self.num_dio_outputs):
@@ -263,9 +295,6 @@ class DistIoClient():
 				self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.clientName, channel), value, QOS_AT_LEAST_ONCE, True)
 				self.writeStateCache()
 
-	# return False on Success, True on Error
-	def setDigitalOutput(self, channel, value, quiet = False):
-		return True
 
 	def _setDigitalInputPullup(self, channel, value):
 
@@ -297,31 +326,56 @@ class DistIoClient():
 			self.mqttc.publish("io/{0}/dio-input/{1}/pullup".format(self.clientName, channel), value, QOS_AT_LEAST_ONCE, True)
 
 			self.writeStateCache()
-
-	def setDigitalInputPullup(self, channel, value):
-		return True
-
+		
 	def _pollInputs(self):
+		
+		# time this io bank poll for performance
+		if self.inputPollTimeMs is 0:
+			timeStart = time.time()
+		
+		# Clear inputStateCheck list
 		self.inputStateCheck = []
+		
+		# Call subclass method which should
+		# fill inputStateCheck with checked values
 		self.pollInputs()
+		
+		# Iterate list of checked inputs and check
+		# against previous cached state for changes
 		for i in range(len(self.inputStateCheck)):
 			if self.state["inputs"][i]["state"] != self.inputStateCheck[i]:
+				if self.debug_enabled:
+					print("input ch{0} changed from {1} to {2}".format(i, self.inputStateCheck[i], self.state["inputs"][i]["state"]))
 				self.state["inputs"][i]["state"] = self.inputStateCheck[i]
-				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), inputStateCheck[i], QOS_AT_LEAST_ONCE, True)
-				self.writeStateCache()
-
-	def pollInputs(self):
-		pass
+				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), self.inputStateCheck[i], QOS_AT_LEAST_ONCE, True)
+				# self.writeStateCache()
+				
+		if self.inputPollTimeMs is 0:
+			self.inputPollTimeMs = (time.time() - timeStart) * 1000
+			self.writeLog("input bank poll time is {:.2f} milliseconds".format(self.inputPollTimeMs), "debug")
+	
+	# digitalInputChanged(channel, new state, timestamp elapsed seconds)
+	# Called from subclass, generally after an interrupt was
+	# generated.  Could be called as a result of polling within
+	# a subclass also
+	def digitalInputChanged(self, channel, state, timestamp):
+		if self.state["inputs"][channel]["state"] != state:
+			if self.debug_enabled:
+				print("input ch{0} changed from {1} to {2}".format(channel, self.state["inputs"][channel]["state"], state))
+			self.state["inputs"][channel]["state"] = state
+			self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, channel), state, QOS_AT_LEAST_ONCE, True)
 
 	def run(self):
 		running = True
+		loop_count = 0
 		try:
 			if self.debug_enabled:
 				print("starting ::run() mainloop")
 				
 			while running:
 				
-				self._pollInputs()
+				if self.digitalInputPollingEnabled:
+					self._pollInputs()
 				
 				# Process Output Pulses
 				for i in range(self.num_dio_outputs):
@@ -329,7 +383,11 @@ class DistIoClient():
 						self._setDigitalOutput(i, self.dioOutputPulse[i].outputRequest, True)
 						self.dioOutputPulse[i].outputRequest = None
 				
-				time.sleep(0.01) # 10mS resolution
+				# sleep during main loop unless it was
+				# found that input bank polling takes 
+				# longer than one msec
+				if self.inputPollTimeMs > 1:
+					time.sleep(0.001) # in mS
 				
 		except KeyboardInterrupt:
 			self.writeStateCache()
@@ -348,12 +406,10 @@ class DistIoClient():
 class Pulse():
 
 	def __init__(self):
+		
 		self.configured = False
 		self.running = False
 		self.outputRequest = None
-		
-		# how do we track where we are?
-		# we are in a pulse, or an off pulse, or in between sets waiting
 
 	def pulse(self, args):
 
