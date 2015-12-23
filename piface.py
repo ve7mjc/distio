@@ -14,7 +14,7 @@
 from distio_client import *
 import pifacedigitalio
 
-class PiFaceAdapter(distio_client):
+class piface_adapter(distio_client):
 
 	def init(self):
 
@@ -60,4 +60,4 @@ class PiFaceAdapter(distio_client):
 	def digitalInputInterrupt(self, event):
 		self.digitalInputChanged(event.pin_num, event.direction, event.timestamp)
 
-pi = PiFaceAdapter()
+pi = piface_adapter()

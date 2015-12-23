@@ -10,23 +10,33 @@
 # Basic Structure
 # io/{client-name}/{io-class}/{channel_num}
 #
-# Digital Inputs
-# Commands:
+# DIGITAL INPUT COMMANDS
+#
 # io/{client-name}/dio-input/{channel_num}/set/{parameter}
 # Parameters:
+#  - state: set output to state (0,1)
 #  - pullup: set input pullups if available (0,1)
-#  - 
-# Responses:
+#  - pulse: set output to pulse
+#
+# DIGITAL INPUT RESPONSES
+#
 # io/{client-name}/dio-input/{channel_num}/state [basic value (0,1)]
 # io/{client-name}/dio-input/{channel_num}/event/transition/{direction} [json event]
+# json event
+# - value_old
+# - value_new
+# - time_event (elapsed epoch seconds)
+# - time_elapsed (elapsed time in ms)
 #
-# Digital Outputs
-# Commands:
+# DIGITAL OUTPUT COMMANDS
+#
 # io/{client-name}/dio-output/{channel_num}/set/{parameter} [value]
 # Parameters: 
 #   value - set output state (0,1) or ("on", "off")
 #   pullup - 
-# Responses:
+#
+# DIGITAL OUTPUT RESPONSES
+#
 # io/{client-name}/dio-output/{channel_num}/state [value]
 #
 
