@@ -1,7 +1,33 @@
-# distio client class
+# distio_client
 #
-# Superclass for creating powerful IO Adapters
-# which map directly to MQTT topics
+# MQTT mapped IO Adapter Superclass
+#
+# MQTTC Topics
+#
+# Last Will and Testament: clients/{client_name}/status offline
+# Connect Hello: clients/{client_name}/status online
+# 
+# Basic Structure
+# io/{client-name}/{io-class}/{channel_num}
+#
+# Digital Inputs
+# Commands:
+# io/{client-name}/dio-input/{channel_num}/set/{parameter}
+# Parameters:
+#  - pullup: set input pullups if available (0,1)
+#  - 
+# Responses:
+# io/{client-name}/dio-input/{channel_num}/state [basic value (0,1)]
+# io/{client-name}/dio-input/{channel_num}/event/transition/{direction} [json event]
+#
+# Digital Outputs
+# Commands:
+# io/{client-name}/dio-output/{channel_num}/set/{parameter} [value]
+# Parameters: 
+#   value - set output state (0,1) or ("on", "off")
+#   pullup - 
+# Responses:
+# io/{client-name}/dio-output/{channel_num}/state [value]
 #
 
 import sys, os
@@ -13,12 +39,11 @@ import re
 import paho.mqtt.client as paho
 import json, pprint
 
+from distio_pulse import distio_pulse
+
 QOS_AT_MOST_ONCE = 0
 QOS_AT_LEAST_ONCE = 1
 QOS_EXACTLY_ONCE = 2
-
-class distio_input():
-	pass
 
 class distio_client():
 
@@ -32,51 +57,21 @@ class distio_client():
 		self.digitalInputPollingEnabled = True
 		
 		# debugging and performance
-		self.debug_enabled = False
+		self.debugEnabled = False
 		self.inputPollTimeMs = 0
 
 		self.auto_run = True
 
-		# calculate application base name and real application path
-		self.scriptNameBase = sys.argv[0]
-		if "." in sys.argv[0]:
-			e = sys.argv[0].split(".")
-			self.scriptNameBase = e[len(e)-2]
-
-		self.appPath = os.path.dirname(os.path.realpath(sys.argv[0]))
-		self.stateCacheFile = "{0}/{1}.cache".format(self.appPath, self.scriptNameBase)
-
-		# call init method which may be reimplemented
+		# Load application specific configuration
+		# Supply commandline argument as default
+		self.loadConfig(sys.argv[0])
+		
+		# call subclass init, so we have the config options
 		self.init()
 
-		# Check for commandline arguments
-		# Load config
-		if (len(sys.argv) >= 2):
-			if os.path.isfile(sys.argv[1]):
-				configFilePath = sys.argv[1]
-			else:
-				print("cannot access configuration file {0}".format(sys.argv[1]))
-				exit()
-		else:
-			if os.path.isfile("{1}.json".format(self.appPath, self.scriptNameBase)):
-				configFilePath = "{1}.json".format(self.appPath, self.scriptNameBase)
-			else:
-				print("needs config; eg. {0} config.json".format(sys.argv[0]))
-				print("tried {0}".format("{1}.json".format(self.appPath, self.scriptNameBase)))
-				exit()
-			
-		# Try to process config file	
-		try:
-			with open(configFilePath) as data_file:
-				self.config = json.load(data_file)
-		except:
-			self.writeLog("unable to process configuration file {0}".format(configFilePath))
-
-
+		# Configure MQTTC Client
 		self.clientName = self.config["mqttClientName"]
 		self.mqttc = paho.Client(self.clientName)
-
-		# Assign event callbacks for MQTT client
 		self.mqttc.on_message = self._onMqttMessage
 		self.mqttc.on_connect = self._onMqttConnect
 		self.mqttc.on_publish = self._onMqttPublish
@@ -84,18 +79,18 @@ class distio_client():
 
 		# Set MQTT Last Will and Testament to maintain
 		# client status tracking
-		# maintaind during on_connect callback also
-		if self.debug_enabled:
+		# maintained during on_connect callback also
+		if self.debugEnabled:
 			print("Connecting to MQTT Broker at {0}:{1}".format(self.config["mqttRemoteHost"], self.config["mqttRemotePort"]))
 		self.mqttc.will_set("clients/{0}/status".format(self.clientName), 'offline', QOS_AT_LEAST_ONCE, True)
 		self.mqttc.connect(self.config["mqttRemoteHost"], self.config["mqttRemotePort"])
+		
+		# call mqttc loop to start and operate in 
+		# a dedicated thread
 		self.mqttc.loop_start()
 
 		# Initialize state and then attemp to recover
-		# from a disk cache
-		# todo, consider reloading state from a retained
-		# MQTT topic message
-		self.initState()
+		# from a disk based cache
 		self.loadState()
 
 		# we are not yet resuming continuous pulsing
@@ -112,6 +107,61 @@ class distio_client():
 				self.run()
 			except (KeyboardInterrupt, SystemExit):
 				print("Received keyboard interrupt.  Shutting down..")
+
+	def loadConfig(self, configFile):
+		
+		# calculate application base name and real application path
+		e = configFile.split("/")
+		self.appFullName = e[len(e)-1]
+		self.appBaseName = self.appFullName
+		if "." in self.appBaseName:
+			e = self.appBaseName.split('.')
+			self.appBaseName = e[len(e)-2]
+		self.appPath = os.path.dirname(os.path.realpath(configFile))
+		
+		self.stateCacheFile = os.path.join(self.appPath, "{0}.cache".format(self.appBaseName))
+		
+		if self.debugEnabled:
+			print("sys.argv[0]: {0}".format(sys.argv[0]))
+			print("realpath(sys.argv[0]): {0}".format(os.path.realpath(sys.argv[0])))
+			print("dirname(realpath(sys.argv[0])): {0}".format(os.path.dirname(os.path.realpath(sys.argv[0]))))
+	
+			print("script full name: {0}".format(self.appFullName))
+			print("script base name: {0}".format(self.appBaseName))
+			print("script location: {0}".format(self.appPath))
+			print("stateCacheFile: {0}".format(self.stateCacheFile))
+		
+		# Check for commandline arguments
+		# Load config
+		if (len(sys.argv) >= 2):
+			
+			# build a path from supplied argument accounting for
+			# referencing local file versus remote file (./ vs full path /)
+			self.configPath = sys.argv[1]
+			if self.configPath[:2] != "./":
+				self.configPath = os.path.join(self.appPath, self.configPath)
+
+			# Supplied config path is not a real file or cannot be accessed	
+			if not os.path.isfile(self.configPath):
+				print("cannot access configuration file {0}".format(sys.argv[1]))
+				exit()
+		else:
+			
+			# build a default config file and path based on script base name
+			self.configPath = os.path.join(self.appPath, "{0}.cfg".format(self.appBaseName))
+			
+			# the default config file does not exist or could not be accessed
+			if not os.path.isfile(self.configPath):
+				print("needs config; eg. {0}.cfg".format(self.appBaseName))
+				exit()
+			
+		# Try to process config file
+		try:
+			with open(self.configPath) as data_file:
+				self.config = json.load(data_file)
+			print("loaded config from: {0}".format(self.configPath))
+		except:
+			self.writeLog("unable to process configuration file {0}".format(self.configPath))
 
 	#
 	# STUB METHODS for reimplementation 
@@ -155,7 +205,7 @@ class distio_client():
 
 			if match.group(2).lower() == "state":
 				self._setDigitalOutput(channel, message)
-				if self.debug_enabled:
+				if self.debugEnabled:
 					print("set state ch {0} to {1}".format(channel, message))
 
 			# Pulse output
@@ -211,6 +261,10 @@ class distio_client():
 		self.mqttc.publish("log/{0}/{1}".format(self.clientName,level), message, QOS_AT_MOST_ONCE)
 
 	def loadState(self):
+
+		# init state first so we can append or otherwise
+		# default if a state is not available to load
+		self.initState()
 
 		# check if stateCacheFile can be read
 		if not os.path.isfile(self.stateCacheFile):
@@ -350,7 +404,7 @@ class distio_client():
 		# against previous cached state for changes
 		for i in range(len(self.inputStateCheck)):
 			if self.state["inputs"][i]["state"] != self.inputStateCheck[i]:
-				if self.debug_enabled:
+				if self.debugEnabled:
 					print("input ch{0} changed from {1} to {2}".format(i, self.inputStateCheck[i], self.state["inputs"][i]["state"]))
 				self.state["inputs"][i]["state"] = self.inputStateCheck[i]
 				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), self.inputStateCheck[i], QOS_AT_LEAST_ONCE, True)
@@ -382,7 +436,7 @@ class distio_client():
 			# timestamp current event
 			event["time_event"] = time.time()
 		
-			if self.debug_enabled:
+			if self.debugEnabled:
 				print("input ch{0} changed from {1} to {2}".format(channel, self.state["inputs"][channel]["state"], state))
 				
 			self.state["inputs"][channel]["state"] = state
@@ -402,7 +456,7 @@ class distio_client():
 		running = True
 		loop_count = 0
 		try:
-			if self.debug_enabled:
+			if self.debugEnabled:
 				print("starting ::run() mainloop")
 				
 			while running:
@@ -427,137 +481,7 @@ class distio_client():
 			running = False
 
 
-# Pulse State Machine
-# 1 - On for xx ms, then off
-# 2 - On for xx ms, Off for xx ms, repeat xx times
-# 3 - On for xx ms, Off for xx ms, repeat xx times,
-#     off for xx ms, repeat xx times
-#     typical would be blink patterns on indicators
-# Note: values are milliseconds and loop counts
-#       a value of 0 indicates indefinite (may need to change)
-#
-class distio_pulse():
 
-	def __init__(self):
-		
-		self.configured = False
-		self.running = False
-		self.outputRequest = None
 
-	def pulse(self, args):
-
-		# process supplied arguments
-		if len(args) > 0: self.on_time = int(args[0])
-		if len(args) > 1: self.off_time = int(args[1])
-		else: self.off_time = -1
-		if len(args) > 2: self.num_reps = int(args[2])
-		else: self.num_reps = -1
-		if len(args) > 3: self.time_between_sets = int(args[3])
-		else: self.time_between_sets = -1
-		if len(args) > 4: self.num_sets = int(args[4])
-		else: self.num_sets = -1
-
-		self.on = False
-		self.rep_count = 0
-		self.rep_timer = self.on_time
-		
-		self.configured = True
-		self.process()
-
-		self.startTimer()
-		
-		self.running = True
-		
-		# States
-		# 0 - in a pulse
-		# 1 - in a pulse off_time
-		# 2 - waiting in between sets
-		self.state = 0
-		self.currentRep = 1	
-		self.currentSet = 1
-		
-		return False
-		
-	def startTimer(self):
-		self.timer = time.time()
-		
-	def checkTimer(self):
-		elapsedTime = (time.time() - self.timer) * 1000;
-		return elapsedTime
-
-	# advance time, process state
-	def process(self):
-
-		# return if not set up properly
-		if not self.configured:
-			return False
-			
-		if self.running:
-			
-			# Waiting in a pulse
-			if self.state == 0:
-				if self.checkTimer() > self.on_time:
-					self.outputRequest = 0
-					
-					# if an off time has not been declared, we
-					# are done here
-					if self.off_time == -1:
-						self.running = False
-					else:
-						self.state = 1
-						self.startTimer()
-					
-			# Waiting after a pulse
-			elif self.state == 1:
-				
-				if self.checkTimer() > self.off_time:
-					
-					# number of reps not specified but off time
-					# was thus, we are looping indefinitely
-					if (self.num_reps <= 0):
-						self.startTimer()
-						self.state = 0
-						self.outputRequest = 1
-					# we are tracking number of reps
-					elif (self.num_reps > 0):
-						if self.currentRep < self.num_reps:
-							# go into another rep
-							self.startTimer()
-							self.currentRep = self.currentRep + 1
-							self.state = 0
-							self.outputRequest = 1
-						else:
-							# completed target number of reps
-							# do we need to enter inter-rep-delay
-							if self.time_between_sets >= 0:
-								# waiting between reps
-								self.state = 2
-								self.startTimer()
-							else:
-								# concluded our reps
-								self.running = False
-
-			# Waiting in between sets
-			elif self.state == 2:
-				if self.checkTimer() > self.time_between_sets:
-					
-					# have we completed our sets?
-					if (self.currentSet < self.num_sets) or (self.num_sets <= 0):
-						# start a new rep in a new set
-						self.currentRep = 1
-						self.currentSet = self.currentSet + 1
-						self.state = 0
-						self.outputRequest = 1
-						self.startTimer()
-					else:
-						# we are done
-						self.running = False
-
-		# If we require DIO maintenance,
-		# flag this in the return
-		if self.outputRequest is not None:
-			#print("requesting transition to {0}".format(self.outputRequest))
-			return True
-		
-		# work is not required
-		return False
+class distio_input():
+	pass
