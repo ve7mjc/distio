@@ -17,7 +17,10 @@ QOS_AT_MOST_ONCE = 0
 QOS_AT_LEAST_ONCE = 1
 QOS_EXACTLY_ONCE = 2
 
-class DistIoClient():
+class distio_input():
+	pass
+
+class distio_client():
 
 	def __init__(self, config=None):
 
@@ -48,28 +51,27 @@ class DistIoClient():
 
 		# Check for commandline arguments
 		# Load config
-		if (len(sys.argv) < 2):
-			# attempt to load from script_name.cache
-			try:
-				with open("{0}/{1}.json".format(self.appPath, self.scriptNameBase)) as data_file:
-					self.config = json.load(data_file)
-			except:
-				print("needs config; eg. {0} config.json".format(sys.argv[0]))
+		if (len(sys.argv) >= 2):
+			if os.path.isfile(sys.argv[1]):
+				configFilePath = sys.argv[1]
+			else:
+				print("cannot access configuration file {0}".format(sys.argv[1]))
 				exit()
 		else:
-			# Check if config file supplied is accessible,
-			# otherwise quit
-			if not os.path.isfile(sys.argv[1]):
-				print("cannot access {0}".format(sys.argv[1]))
+			if os.path.isfile("{1}.json".format(self.appPath, self.scriptNameBase)):
+				configFilePath = "{1}.json".format(self.appPath, self.scriptNameBase)
+			else:
+				print("needs config; eg. {0} config.json".format(sys.argv[0]))
+				print("tried {0}".format("{1}.json".format(self.appPath, self.scriptNameBase)))
 				exit()
+			
+		# Try to process config file	
+		try:
+			with open(configFilePath) as data_file:
+				self.config = json.load(data_file)
+		except:
+			self.writeLog("unable to process configuration file {0}".format(configFilePath))
 
-			# Load JSON configuration from disk
-			try:
-				with open(sys.argv[1]) as data_file:
-					self.config = json.load(data_file)
-			except:
-				print("unable to process {0}".format(sys.argv[1]))
-				exit()
 
 		self.clientName = self.config["mqttClientName"]
 		self.mqttc = paho.Client(self.clientName)
@@ -101,12 +103,15 @@ class DistIoClient():
 		self.inputStateCheck = []
 		self.dioOutputPulse = []
 		for i in range(self.num_dio_outputs):
-			self.dioOutputPulse.append(Pulse())
+			self.dioOutputPulse.append(distio_pulse())
 
 		# automatically begin mainloop unless
 		# directed otherwise in reimplemented init() method
 		if self.auto_run:
-			self.run()
+			try:
+				self.run()
+			except (KeyboardInterrupt, SystemExit):
+				print("Received keyboard interrupt.  Shutting down..")
 
 	#
 	# STUB METHODS for reimplementation 
@@ -216,7 +221,7 @@ class DistIoClient():
 				self.state = json.load(data_file)
 				self.writeLog("loaded piface cached state from disk")
 		except:
-			self.writeLog("unable to process piface cached state ({0}/piface.cache)".format(appPath))
+			self.writeLog("unable to process piface cached state ({0}/piface.cache)".format(self.appPath))
 			return True
 
 		# resume IO state and settins
@@ -256,6 +261,7 @@ class DistIoClient():
 			# default to internal pullups enabled for all inputs
 			# otherwise, unknowing users will be surprised with noise
 			self.state["inputs"][i]["pullup"] = 1
+			self.state["inputs"][i]["time_last_change"] = None
 
 		self.state["outputs"] = []
 		for i in range(self.num_dio_outputs):
@@ -359,11 +365,38 @@ class DistIoClient():
 	# generated.  Could be called as a result of polling within
 	# a subclass also
 	def digitalInputChanged(self, channel, state, timestamp):
+	
+		# do we in fact have an input transition event	
 		if self.state["inputs"][channel]["state"] != state:
+			
+			# build an event object
+			event = {}
+			event["value_new"] = state
+			event["value_old"] = self.state["inputs"][channel]["state"]
+			
+			# calculate elapsed time since last transition event
+			# convert to milliseconds and round to nearest whole millisecond
+			if self.state["inputs"][channel]["time_last_change"] is not None:
+				event["time_elapsed"] = round((time.time() - self.state["inputs"][channel]["time_last_change"]) * 1000)
+				
+			# timestamp current event
+			event["time_event"] = time.time()
+		
 			if self.debug_enabled:
 				print("input ch{0} changed from {1} to {2}".format(channel, self.state["inputs"][channel]["state"], state))
+				
 			self.state["inputs"][channel]["state"] = state
 			self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, channel), state, QOS_AT_LEAST_ONCE, True)
+			
+			# determine event transition type
+			if state: input_transition_direction = "rise"
+			else: input_transition_direction = "fall"
+			
+			# send JSON event
+			self.mqttc.publish("io/{0}/dio-input/{1}/event/transition/{2}".format(self.clientName, channel, input_transition_direction), json.dumps(event))
+			
+			# store this event for calculation of event duraction
+			self.state["inputs"][channel]["time_last_change"] = time.time()
 
 	def run(self):
 		running = True
@@ -403,7 +436,7 @@ class DistIoClient():
 # Note: values are milliseconds and loop counts
 #       a value of 0 indicates indefinite (may need to change)
 #
-class Pulse():
+class distio_pulse():
 
 	def __init__(self):
 		

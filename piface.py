@@ -11,10 +11,10 @@
 #           and other groups
 #
 
-import distioclient
+from distio_client import *
 import pifacedigitalio
 
-class PiFaceAdapter(distioclient.DistIoClient):
+class PiFaceAdapter(distio_client):
 
 	def init(self):
 
