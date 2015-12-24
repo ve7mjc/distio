@@ -50,6 +50,7 @@ import paho.mqtt.client as paho
 import json, pprint
 
 from distio_pulse import distio_pulse
+import distio_config
 
 QOS_AT_MOST_ONCE = 0
 QOS_AT_LEAST_ONCE = 1
@@ -57,7 +58,7 @@ QOS_EXACTLY_ONCE = 2
 
 class distio_client():
 
-	def __init__(self, config=None):
+	def __init__(self, configPath=None):
 
 		# default hardware template
 		self.num_dio_inputs = 0
@@ -74,13 +75,14 @@ class distio_client():
 
 		# Load application specific configuration
 		# Supply commandline argument as default
-		self.loadConfig(sys.argv[0])
-		
+		self.config = distio_config.config()
+		self.config.load()
+
 		# call subclass init, so we have the config options
 		self.init()
 
 		# Configure MQTTC Client
-		self.clientName = self.config["mqttClientName"]
+		self.clientName = self.config.param("mqtt","clientName")
 		self.mqttc = paho.Client(self.clientName)
 		self.mqttc.on_message = self._onMqttMessage
 		self.mqttc.on_connect = self._onMqttConnect
@@ -91,17 +93,18 @@ class distio_client():
 		# client status tracking
 		# maintained during on_connect callback also
 		if self.debugEnabled:
-			print("Connecting to MQTT Broker at {0}:{1}".format(self.config["mqttRemoteHost"], self.config["mqttRemotePort"]))
-		self.mqttc.will_set("clients/{0}/status".format(self.clientName), 'offline', QOS_AT_LEAST_ONCE, True)
-		self.mqttc.connect(self.config["mqttRemoteHost"], self.config["mqttRemotePort"])
+			print("Connecting to MQTT Broker at {0}:{1}".format(self.config.param("mqtt","remoteHost"), self.config.param("mqtt","remotePort")))
+		self.mqttc.will_set("clients/{0}/status".format(self.config.param("mqtt","clientName")), 'offline', QOS_AT_LEAST_ONCE, True)
+		self.mqttc.connect(self.config.param("mqtt","remoteHost"), self.config.param("mqtt","remotePort"))
+		
+		# Initialize state and then attemp to recover
+		# from a disk based cache. This should be called
+		# before mqttc loop begins
+		self.loadState()
 		
 		# call mqttc loop to start and operate in 
 		# a dedicated thread
 		self.mqttc.loop_start()
-
-		# Initialize state and then attemp to recover
-		# from a disk based cache
-		self.loadState()
 
 		# we are not yet resuming continuous pulsing
 		# outputs from persistent state cache from disk
@@ -110,68 +113,24 @@ class distio_client():
 		for i in range(self.num_dio_outputs):
 			self.dioOutputPulse.append(distio_pulse())
 
+		# check io banks against what we expect them to be
+		self.pollInputs()
+		
+		# we have syncronized, so cache our state
+		self.writeStateCache()
+
+		# begin listeners and other operations in subclass
+		self.start()
+
 		# automatically begin mainloop unless
 		# directed otherwise in reimplemented init() method
 		if self.auto_run:
 			try:
+				print("running.")
 				self.run()
 			except (KeyboardInterrupt, SystemExit):
 				print("Received keyboard interrupt.  Shutting down..")
 
-	def loadConfig(self, configFile):
-		
-		# calculate application base name and real application path
-		e = configFile.split("/")
-		self.appFullName = e[len(e)-1]
-		self.appBaseName = self.appFullName
-		if "." in self.appBaseName:
-			e = self.appBaseName.split('.')
-			self.appBaseName = e[len(e)-2]
-		self.appPath = os.path.dirname(os.path.realpath(configFile))
-		
-		self.stateCacheFile = os.path.join(self.appPath, "{0}.cache".format(self.appBaseName))
-		
-		if self.debugEnabled:
-			print("sys.argv[0]: {0}".format(sys.argv[0]))
-			print("realpath(sys.argv[0]): {0}".format(os.path.realpath(sys.argv[0])))
-			print("dirname(realpath(sys.argv[0])): {0}".format(os.path.dirname(os.path.realpath(sys.argv[0]))))
-	
-			print("script full name: {0}".format(self.appFullName))
-			print("script base name: {0}".format(self.appBaseName))
-			print("script location: {0}".format(self.appPath))
-			print("stateCacheFile: {0}".format(self.stateCacheFile))
-		
-		# Check for commandline arguments
-		# Load config
-		if (len(sys.argv) >= 2):
-			
-			# build a path from supplied argument accounting for
-			# referencing local file versus remote file (./ vs full path /)
-			self.configPath = sys.argv[1]
-			if self.configPath[:2] != "./":
-				self.configPath = os.path.join(self.appPath, self.configPath)
-
-			# Supplied config path is not a real file or cannot be accessed	
-			if not os.path.isfile(self.configPath):
-				print("cannot access configuration file {0}".format(sys.argv[1]))
-				exit()
-		else:
-			
-			# build a default config file and path based on script base name
-			self.configPath = os.path.join(self.appPath, "{0}.cfg".format(self.appBaseName))
-			
-			# the default config file does not exist or could not be accessed
-			if not os.path.isfile(self.configPath):
-				print("needs config; eg. {0}.cfg".format(self.appBaseName))
-				exit()
-			
-		# Try to process config file
-		try:
-			with open(self.configPath) as data_file:
-				self.config = json.load(data_file)
-			print("loaded config from: {0}".format(self.configPath))
-		except:
-			self.writeLog("unable to process configuration file {0}".format(self.configPath))
 
 	#
 	# STUB METHODS for reimplementation 
@@ -180,19 +139,21 @@ class distio_client():
 	def init():
 		pass
 		
+	def start():
+		pass
+		
 	def setDigitalOutput(self, channel, value, quiet = False):
 		return True
 		
 	def setDigitalInputPullup(self, channel, value):
 		return True
 		
-	def pollInputs(self):
-		pass
-	
+	def readDigitalInput(self, channel):
+		return True
 
 	def _onMqttConnect(self, *args, **kwargs):
-		self.mqttc.subscribe("io/{0}/+/+/set/#".format(self.clientName), QOS_EXACTLY_ONCE)
-		self.mqttc.publish("clients/{0}/status".format(self.clientName), 'online', QOS_AT_LEAST_ONCE, True)
+		self.mqttc.subscribe("io/{0}/+/+/set/#".format(self.config.param("mqtt","clientName")), QOS_EXACTLY_ONCE)
+		self.mqttc.publish("clients/{0}/status".format(self.config.param("mqtt","clientName")), 'online', QOS_AT_LEAST_ONCE, True)
 
 	def _onMqttMessage(self, *args, **kwargs):
 
@@ -204,7 +165,7 @@ class distio_client():
 		# state - set output state (on/off, etc)
 		# mode - Set output mode, (open_collector, logic, etc)
 		# pulse - Start pulse patten
-		match = re.search("io/{0}/dio-output/([0-9]*)/set/([0-9A-Za-z]*)".format(self.clientName), msg.topic)
+		match = re.search("io/{0}/dio-output/([0-9]*)/set/([0-9A-Za-z]*)".format(self.config.param("mqtt","clientName")), msg.topic)
 		if match:
 		
 			channel = int(match.group(1))
@@ -246,7 +207,7 @@ class distio_client():
 				self.writeLog("unrecognized command \"{0}\" -> \"{1}\" received; ignoring".format(msg.topic, message), "error")
 
 		# dio-output pullup set
-		match = re.search("io/{0}/dio-input/([0-9]*)/pullup/set/([0-9A-Za-z]*)".format(self.clientName), msg.topic)
+		match = re.search("io/{0}/dio-input/([0-9]*)/pullup/set/([0-9A-Za-z]*)".format(self.config.param("mqtt","clientName")), msg.topic)
 		if match:
 
 			if match.group(2).lower() == "pullup":
@@ -268,7 +229,7 @@ class distio_client():
 	    pass
 
 	def writeLog(self, message, level="debug"):
-		self.mqttc.publish("log/{0}/{1}".format(self.clientName,level), message, QOS_AT_MOST_ONCE)
+		self.mqttc.publish("log/{0}/{1}".format(self.config.param("mqtt","clientName"),level), message, QOS_AT_MOST_ONCE)
 
 	def loadState(self):
 
@@ -277,15 +238,15 @@ class distio_client():
 		self.initState()
 
 		# check if stateCacheFile can be read
-		if not os.path.isfile(self.stateCacheFile):
+		if not os.path.isfile(self.config.param("stateCacheFile")):
 			return True
 
 		try:
-			with open("{0}/piface.cache".format(self.appPath)) as data_file:
+			with open(self.config.param("stateCacheFile")) as data_file:
 				self.state = json.load(data_file)
 				self.writeLog("loaded piface cached state from disk")
 		except:
-			self.writeLog("unable to process piface cached state ({0}/piface.cache)".format(self.appPath))
+			self.writeLog("unable to process piface cached state ({0})".format(self.config.param("stateCacheFile")))
 			return True
 
 		# resume IO state and settins
@@ -305,7 +266,7 @@ class distio_client():
 
 	# Write state to disk / cache
 	def writeStateCache(self):
-		with open("{0}/piface.cache".format(self.appPath), 'w') as outfile:
+		with open(self.config.param("stateCacheFile"), 'w') as outfile:
 			json.dump(self.state, outfile, indent=1)
 
 	def initState(self):
@@ -314,6 +275,7 @@ class distio_client():
 		self.state  = {}
 
 		self.state["inputs"] = []
+		
 		for i in range(self.num_dio_inputs):
 			
 			input = {}
@@ -362,7 +324,7 @@ class distio_client():
 			# cache state to disk
 			if not quiet:
 				self.state["outputs"][channel]["state"] = value
-				self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.clientName, channel), value, QOS_AT_LEAST_ONCE, True)
+				self.mqttc.publish("io/{0}/dio-output/{1}/state".format(self.config.param("mqtt","clientName"), channel), value, QOS_AT_LEAST_ONCE, True)
 				self.writeStateCache()
 
 
@@ -393,33 +355,26 @@ class distio_client():
 			# track, publish, and set state
 			# cache state to disk
 			self.state["inputs"][channel]["pullup"] = value
-			self.mqttc.publish("io/{0}/dio-input/{1}/pullup".format(self.clientName, channel), value, QOS_AT_LEAST_ONCE, True)
+			self.mqttc.publish("io/{0}/dio-input/{1}/pullup".format(self.config.param("mqtt","clientName"), channel), value, QOS_AT_LEAST_ONCE, True)
 
 			self.writeStateCache()
 		
-	def _pollInputs(self):
+	def pollInputs(self):
 		
 		# time this io bank poll for performance
 		if self.inputPollTimeMs is 0:
 			timeStart = time.time()
-		
-		# Clear inputStateCheck list
-		self.inputStateCheck = []
-		
-		# Call subclass method which should
-		# fill inputStateCheck with checked values
-		self.pollInputs()
-		
-		# Iterate list of checked inputs and check
-		# against previous cached state for changes
+
+		# Iterate inputs and check against previously
+		# known state, detecting changes
 		for i in range(len(self.inputStateCheck)):
-			if self.state["inputs"][i]["state"] != self.inputStateCheck[i]:
+			inputState = self.readDigitalInput[i]
+			if inputState != self.state["inputs"][i]["state"]:
 				if self.debugEnabled:
-					print("input ch{0} changed from {1} to {2}".format(i, self.inputStateCheck[i], self.state["inputs"][i]["state"]))
-				self.state["inputs"][i]["state"] = self.inputStateCheck[i]
-				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, i), self.inputStateCheck[i], QOS_AT_LEAST_ONCE, True)
-				# self.writeStateCache()
-				
+					print("input ch{0} changed from {1} to {2}".format(i, inputState, self.state["inputs"][i]["state"]))
+				self.state["inputs"][i]["state"] = inputState
+				self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.config.param("mqtt","clientName"), i), inputState, QOS_AT_LEAST_ONCE, True)
+
 		if self.inputPollTimeMs is 0:
 			self.inputPollTimeMs = (time.time() - timeStart) * 1000
 			self.writeLog("input bank poll time is {:.2f} milliseconds".format(self.inputPollTimeMs), "debug")
@@ -440,8 +395,9 @@ class distio_client():
 			
 			# calculate elapsed time since last transition event
 			# convert to milliseconds and round to nearest whole millisecond
-			if self.state["inputs"][channel]["time_last_change"] is not None:
-				event["time_elapsed"] = round((time.time() - self.state["inputs"][channel]["time_last_change"]) * 1000)
+			if "time_last_change" in self.state["inputs"][channel]:
+				if self.state["inputs"][channel]["time_last_change"] is not None:
+					event["time_elapsed"] = round((time.time() - self.state["inputs"][channel]["time_last_change"]) * 1000)
 				
 			# timestamp current event
 			event["time_event"] = time.time()
@@ -450,14 +406,14 @@ class distio_client():
 				print("input ch{0} changed from {1} to {2}".format(channel, self.state["inputs"][channel]["state"], state))
 				
 			self.state["inputs"][channel]["state"] = state
-			self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.clientName, channel), state, QOS_AT_LEAST_ONCE, True)
+			self.mqttc.publish("io/{0}/dio-input/{1}/state".format(self.config.param("mqtt","clientName"), channel), state, QOS_AT_LEAST_ONCE, True)
 			
 			# determine event transition type
 			if state: input_transition_direction = "rise"
 			else: input_transition_direction = "fall"
 			
 			# send JSON event
-			self.mqttc.publish("io/{0}/dio-input/{1}/event/transition/{2}".format(self.clientName, channel, input_transition_direction), json.dumps(event))
+			self.mqttc.publish("io/{0}/dio-input/{1}/event/transition/{2}".format(self.config.param("mqtt","clientName"), channel, input_transition_direction), json.dumps(event))
 			
 			# store this event for calculation of event duraction
 			self.state["inputs"][channel]["time_last_change"] = time.time()

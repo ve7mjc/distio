@@ -30,7 +30,9 @@ class piface_adapter(distio_client):
 
 		# Create listener and attach event for each input
 		self.listener = pifacedigitalio.InputEventListener(chip=self.pfd)
-
+		
+	def start(self):
+		
 		# Create interrupt callbacks for all inputs
 		# in both directions (rising and falling) with a
 		# debounce or settle timer, and active the 
@@ -46,16 +48,12 @@ class piface_adapter(distio_client):
 	def setDigitalInputPullup(self, channel, value):
 		self.pfd.gppub.bits[channel].value = value
 		return False
-
-	# Poll Digital Inputs
-	# Can be disabled by setting 
-	# self.digitalInputPollingEnabled to False
-	# Performance: determined through loop testing that 
-	# each digital_read takes 1.3 mS on average to poll
-	def pollInputs(self):
-		for i in range(self.num_dio_inputs):
-			self.inputStateCheck.append(self.pfd.input_pins[i].value)
-		pass
+		
+	def readDigitalInput(self, channel):
+		if (channel >= 0) and (channel < self.num_dio_inputs):
+			return self.pfd.input_pins[channel].value
+		else:
+			self.writeLog("attempt to read digital input ({0}) outside of range({1})".format(channel, self.num_dio_inputs))
 
 	def digitalInputInterrupt(self, event):
 		self.digitalInputChanged(event.pin_num, event.direction, event.timestamp)
