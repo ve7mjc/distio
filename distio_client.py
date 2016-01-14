@@ -50,7 +50,7 @@ import paho.mqtt.client as paho
 import json, pprint
 
 from distio_pulse import distio_pulse
-import distio_config
+import c3lib.config
 
 QOS_AT_MOST_ONCE = 0
 QOS_AT_LEAST_ONCE = 1
@@ -75,7 +75,7 @@ class distio_client():
 
 		# Load application specific configuration
 		# Supply commandline argument as default
-		self.config = distio_config.config()
+		self.config = c3lib.config.config()
 		self.config.load()
 
 		# call subclass init, so we have the config options
